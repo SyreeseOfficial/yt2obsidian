@@ -8,6 +8,7 @@ import traceback
 from pathlib import Path
 from unittest import mock
 
+import ui as UI
 import yt2obsidian as y
 
 V = "dQw4w9WgXcQ"
@@ -385,103 +386,12 @@ def err_of(f):
 
 
 def test_cli():
-    with mock.patch.object(y, "main", return_value=7), mock.patch.object(y, "repl", return_value=9), \
+    with mock.patch.object(y, "main", return_value=7), mock.patch.object(UI, "run", return_value=9), \
             mock.patch.object(y, "at_terminal", return_value=False):
         assert y.cli([]) == 7 and y.cli(["-i"]) == 9 and y.cli(["-h"]) == 0 and y.cli(["--help"]) == 0
         assert y.cli(["-i", "https://youtu.be/x"]) == 1 and y.cli(["--bogus"]) == 1
-        with mock.patch.object(y, "settings_menu") as menu:
-            assert y.cli(["--settings"]) == 0 and menu.called
-
-
-def run_repl(lines, info=None, track=None, retry=None):
-    """Drive y.repl() with scripted input against a tmp vault. Returns (output, tmp Path, opened paths)."""
-    d = Path(tempfile.mkdtemp())
-    (d / "vault").mkdir()
-    (d / "config.toml").write_text(f'vault = "{d}/vault"\ninbox = "Inbox"\n')
-    if retry:
-        (d / "retry.txt").write_text(retry)
-    opened, out = [], io.StringIO()
-    feed = iter(lines)
-
-    def fake_input(prompt=""):
-        try:
-            return next(feed)
-        except StopIteration:
-            raise EOFError
-
-    fake = info if isinstance(info, BaseException) else None
-    with mock.patch.multiple(y, HERE=d, LOG=d / "run.log", RETRY=d / "retry.txt", HISTORY=d / ".history",
-                             fetch=lambda v, c: (_ for _ in ()).throw(fake) if fake else (info or {}),
-                             fetch_track=lambda u, c: track, RETRY_DELAY=0, at_terminal=lambda: False,
-                             notify=lambda m, u=False: opened.append(("toast", m)),
-                             open_obsidian=lambda p: opened.append(("open", p)),
-                             clipboard=lambda: "https://youtu.be/" + V), \
-            mock.patch("builtins.input", fake_input), contextlib.redirect_stdout(out):
-        assert y.repl() == 0
-    return out.getvalue(), d, opened
-
-
-def test_repl():
-    info = {"title": "Cafe \x1b[31mTitle", "channel": "C", "upload_date": "20200101",
-            "subtitles": {"en": [{"ext": "json3", "url": "u"}]}}
-    track = {"events": [{"segs": [{"utf8": "hi"}]}]}
-    out, d, opened = run_repl(["", "garbage", "# note", "?", f"https://youtu.be/{V}", "l", "o", "q"], info, track)
-    # Enter alone pastes the clipboard; the second paste of the same video is a duplicate
-    assert "saved (" in out and "Inbox/Cafe" in out and "duplicate: Inbox/" in out and "\x1b" not in out
-    assert "fetching..." in out and "vault:" in out and "inbox: Inbox" in out and "yt-dlp" in out
-    assert "failed: not a YouTube URL: 'garbage' (? for help)" in out and "<link>" in out
-    assert "session: 1 saved, 1 duplicate" in out and "failed" not in out.split("session:")[1]
-    # typos and comments are not logged; no toasts at a prompt; `l` and `o` find the note
-    log = (d / "run.log").read_text()
-    assert "garbage" not in log and "# note" not in log and log.count("\n") == 2
-    assert not [o for o in opened if o[0] == "toast"] and [o for o in opened if o[0] == "open"]
-    assert str(notes(d)[0]) in out  # `l` lists it; `o` opens it
-    assert ("open", notes(d)[0]) in opened
-    # only real links reach the history file
-    hist = (d / ".history").read_text()
-    assert f"https://youtu.be/{V}" in hist and "garbage" not in hist and "# note" not in hist
-
-
-def test_repl_survives_errors():
-    out, d, _ = run_repl([f"https://youtu.be/{V}", "q"], KeyError("boom"))
-    assert "failed: KeyError" in out and "session: 1 failed" in out
-    out, d, _ = run_repl([f"https://youtu.be/{V}", "q"], KeyboardInterrupt())
-    assert "cancelled" in out and "session" not in out
-
-
-def test_repl_throttle_and_retry():
-    out, d, _ = run_repl([f"https://youtu.be/{V}", "q"], y.Stop("429", "throttled by YouTube"))
-    assert "stopped: throttled by YouTube" in out and "press r" in out
-    assert "1 URL waiting in retry.txt (r to retry)" in out and "1 stopped" in out
-    assert (d / "retry.txt").read_text() == f"https://www.youtube.com/watch?v={V}\n"
-    # `r`: the saved link leaves the queue; a throttle stops the run and keeps the rest
-    info = {"title": "T", "subtitles": {"en": [{"ext": "json3", "url": "u"}]}}
-    track = {"events": [{"segs": [{"utf8": "hi"}]}]}
-    out, d, _ = run_repl(["r", "q"], info, track, retry=f"https://youtu.be/{V}\n")
-    assert "saved (" in out and (d / "retry.txt").read_text() == "" and "waiting" not in out
-    two = f"https://youtu.be/{V}\nhttps://youtu.be/AAAAAAAAAAA\n"
-    out, d, _ = run_repl(["r", "q"], y.Stop("429"), retry=two)
-    assert out.count("stopped:") == 1 and (d / "retry.txt").read_text() == two
-    out, d, _ = run_repl(["r", "q"])
-    assert "retry.txt is empty" in out
-
-
-def test_batch_and_undo():
-    ids = ["AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC"]
-    assert y.urls_in("a\nhttps://youtu.be/x https://youtu.be/y\n") == ["https://youtu.be/x", "https://youtu.be/y"]
-    assert y.urls_in("garbage in here") == ["garbage in here"] and y.urls_in(" one ") == ["one"]
-    info = {"title": "T", "subtitles": {"en": [{"ext": "json3", "url": "u"}]}}
-    track = {"events": [{"segs": [{"utf8": "hi"}]}]}
-    # a pasted list: each link saved in turn (same title -> numbered names), then undo deletes the last, with a prompt
-    out, d, _ = run_repl(["\n".join(f"https://youtu.be/{i}" for i in ids[:2]), "undo", "y", "undo", "n", "q"], info, track)
-    assert "[1/2]" in out and "[2/2]" in out and "deleted" in out and "session: 1 saved" in out
-    assert [p.name for p in notes(d)] == ["T.md"]  # the clash copy was the one undone
-    out, d, _ = run_repl(["undo", "q"])
-    assert "nothing to undo" in out
-    # a throttle on the first link queues the untried ones, in canonical form, and stops
-    out, d, _ = run_repl([" ".join(f"https://youtu.be/{i}?t=5" for i in ids), "q"], y.Stop("429"))
-    assert out.count("stopped:") == 1 and "queued the other 2" in out
-    assert (d / "retry.txt").read_text().split() == [f"https://www.youtube.com/watch?v={i}" for i in ids]
+        with mock.patch.object(UI, "run", return_value=0) as run:
+            assert y.cli(["--settings"]) == 0 and run.call_args.kwargs == {"settings": True}
 
 
 def test_settings():
@@ -507,26 +417,58 @@ def test_settings():
             assert y.parse_setting("timeout", " 45 ") == 45 and y.parse_setting("inbox", " Notes/Yt ") == "Notes/Yt"
             for key, bad in (("timeout", "0"), ("retries", "x"), ("retries", "-1"), ("inbox", ""), ("inbox", "/tmp/x"), ("inbox", "../x")):
                 assert raises(y.parse_setting, key, bad)
-            # the menu: flip (1), cycle (2), type a value (3, 4), bad input, leave
-            feed = iter(["1", "2", "3", "Notes", "4", "0", "4", "", "x", "9", "q"])
-            with mock.patch("builtins.input", lambda p="": next(feed)), mock.patch("builtins.print") as pr:
-                y.settings_menu()
-            shown = "\n".join(str(c.args[0]) for c in pr.call_args_list if c.args)
-            assert "Open the note in Obsidian after saving: off" in shown
-            assert "Desktop notifications: always (even at the prompt)" in shown
-            assert "Inbox folder inside the vault: Notes" in shown and "Seconds to wait per fetch must be a whole number" in shown
-            assert shown.count("pick 1-5") == 2 and "unknown keys ignored: notfy" in shown
-            c = y.load_config()
-            assert (c["open_obsidian"], c["notify"], c["inbox"], c["timeout"]) == (False, "always", "Notes", 15)
-            feed = iter(["d", ""])
-            with mock.patch("builtins.input", lambda p="": next(feed)), mock.patch("builtins.print"):
-                y.settings_menu()
-            assert y.load_config()["notify"] == "auto" and y.load_config()["inbox"] == "Notes"
-            # a broken config returns to the caller with a message, not a traceback
-            cfgfile.write_text("vault = [oops\n")
-            with mock.patch("builtins.print") as pr:
-                y.settings_menu()
-            assert "Config problem" in str(pr.call_args)
+
+
+def test_ui():
+    """Headless Textual run: a pasted pair of links gets two rows, one saved, one stub; settings writes config.toml."""
+    import asyncio
+    d = Path(tempfile.mkdtemp())
+    (d / "vault").mkdir()
+    (d / "config.toml").write_text(f'vault = "{d}/vault"\ninbox = "Inbox"\n')
+    info = lambda v, c: {"title": "No caps"} if v == "BBBBBBBBBBB" else {"title": "T", "subtitles": {"en": [{"ext": "json3", "url": "u"}]}}
+    opened = []
+
+    async def drive():
+        app = UI.YtApp()
+        async with app.run_test(size=(100, 28)) as pilot:
+            await pilot.press(*"https://youtu.be/AAAAAAAAAAA https://youtu.be/BBBBBBBBBBB", "enter")
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if not app.busy:
+                    break
+            rows = list(app.query(UI.Row))
+            assert [r.status for r in rows] == ["saved", "stub"], [r.status for r in rows]
+            assert app.mood == "meh" and len(app.made) == 2
+            await pilot.press("f3", "f3")  # undo: first press asks, second deletes the stub
+            assert rows[1].status == "undone" and not (d / "vault/Inbox/No caps.md").exists()
+            await pilot.press("f2")
+            await pilot.pause(0.2)
+            app.screen.apply("timeout", "30")
+            app.screen.apply("timeout", "0")  # rejected, file keeps 30
+            assert "whole number" in str(app.screen.query_one("#status").render())
+
+    with mock.patch.multiple(y, HERE=d, LOG=d / "run.log", RETRY=d / "retry.txt", fetch=info, fetch_track=lambda u, c: {"events": [{"segs": [{"utf8": "hi"}]}]},
+                             RETRY_DELAY=0, notify=lambda *a, **k: None, open_obsidian=lambda p: opened.append(p)):
+        asyncio.run(drive())
+    assert "timeout = 30" in (d / "config.toml").read_text()
+    assert "\ttui\n" in (d / "run.log").read_text()
+    # a throttle parks the rest of the batch in retry.txt
+    (d / "retry.txt").unlink(missing_ok=True)
+
+    async def throttled():
+        app = UI.YtApp()
+        async with app.run_test(size=(100, 28)) as pilot:
+            await pilot.press(*"https://youtu.be/CCCCCCCCCCC https://youtu.be/DDDDDDDDDDD", "enter")
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if not app.busy:
+                    break
+            got = [(r.status, r.detail) for r in app.query(UI.Row)][-2:]; assert [g[0] for g in got] == ["stopped", "queued"] and app.mood == "sleep", (got, app.mood, app.busy)
+
+    with mock.patch.multiple(y, HERE=d, LOG=d / "run.log", RETRY=d / "retry.txt", fetch=lambda v, c: (_ for _ in ()).throw(y.Stop("429", "throttled by YouTube")),
+                             RETRY_DELAY=0, notify=lambda *a, **k: None):
+        asyncio.run(throttled())
+    assert (d / "retry.txt").read_text().split() == [f"https://www.youtube.com/watch?v={i}" for i in ("CCCCCCCCCCC", "DDDDDDDDDDD")]
 
 
 def test_toast_modes():
@@ -537,16 +479,6 @@ def test_toast_modes():
         with mock.patch.object(y, "notify", lambda m, u=False: sent.append(m)), mock.patch.object(y, "at_terminal", return_value=term):
             y.toast({"notify": mode}, "m", repl)
         assert len(sent) == want, (mode, repl, term)
-
-
-def test_settings_apply_to_next_paste():
-    info = {"title": "T", "subtitles": {"en": [{"ext": "json3", "url": "u"}]}}
-    track = {"events": [{"segs": [{"utf8": "hi"}]}]}
-    out, d, opened = run_repl(["s", "1", "", f"https://youtu.be/{V}", "q"], info, track)
-    assert "Open the note in Obsidian after saving: off" in out and "saved (" in out
-    assert not [o for o in opened if o[0] == "open"]  # the toggle took effect with no restart
-    out, d, opened = run_repl(["s", "1", "1", "b", f"https://youtu.be/{V}", "q"], info, track)
-    assert [o for o in opened if o[0] == "open"]
 
 
 def test_update_and_default_mode():
@@ -561,9 +493,9 @@ def test_update_and_default_mode():
             y.update_ytdlp()
     assert "update failed: no network" in out.getvalue() and "already the latest" in out.getvalue()
     assert "update failed: cancelled" in out.getvalue()
-    with mock.patch.object(y, "main", return_value=7), mock.patch.object(y, "repl", return_value=9):
+    with mock.patch.object(y, "main", return_value=7), mock.patch.object(UI, "run", return_value=9):
         with mock.patch.object(y, "at_terminal", return_value=True), mock.patch.object(y.signal, "signal"):
-            assert y.cli([]) == 9  # a terminal with no argument gets the prompt
+            assert y.cli([]) == 9  # a terminal with no argument gets the UI
         with mock.patch.object(y, "at_terminal", return_value=False):
             assert y.cli([]) == 7  # the hotkey has no terminal: clipboard mode
 

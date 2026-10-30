@@ -22,11 +22,11 @@ ln -s "$PWD/yt" ~/.local/bin/yt           # optional: run it as `yt`
 
 ## Use
 
-- `yt` in a terminal opens the prompt. Paste a link and press Enter (Enter alone pastes the clipboard). Several links, one per line or space-separated, are saved in turn. `?` lists the commands: `o` open the last note, `l` list recent, `r` retry `retry.txt`, `undo` delete the last note, `u` update yt-dlp, `s` settings, `q` quit.
+- `yt` in a terminal opens a full-screen UI with a small mascot, Folio. Paste one or more links (Enter saves; Enter on an empty line pastes the clipboard). Each link gets a row that moves from waiting to fetching to saved, stub, duplicate, skipped, stopped or failed. Arrow keys and Enter on a row open its note. Keys: `ctrl+o` open the last note, `ctrl+r` retry `retry.txt`, `F2` settings, `F3` undo the last note (press twice to confirm), `F4` update yt-dlp, `ctrl+q` quit. They are always shown in the footer.
 - `yt <url>` saves one link. `yt --retry` saves the links in `retry.txt`. `--no-open` skips Obsidian and `--no-notify` skips toasts for that run.
 - With no terminal (a hotkey) it reads the clipboard and shows the result as a toast. Hyprland: `bind = SUPER, Y, exec, ~/.local/bin/yt` (after the `ln -s` above; or `exec, "/path/to/project/yt"`, quoted if the path has spaces).
-- Settings (`s`, or `yt --settings`): open in Obsidian, notifications (`auto` = toast only for hotkey runs, `always`, `never`), inbox folder, fetch timeout, attempts per fetch. `d` resets all but the inbox. Changes apply to the next paste and are written to `config.toml` with comments kept. Unknown keys in `config.toml` are reported, not used.
-- Output is colored in a terminal (status word green/yellow/red, warnings yellow). Set `NO_COLOR=1` to turn it off.
+- Settings (`F2`, or `yt --settings`): open in Obsidian, notifications (`auto` = toast only for hotkey runs, `always`, `never`), inbox folder, fetch timeout, attempts per fetch. The reset button restores all but the inbox. Changes apply to the next paste and are written to `config.toml` with comments kept. Unknown keys in `config.toml` are reported, not used.
+- One-shot runs (`yt <url>`) color the status word in a terminal; set `NO_COLOR=1` to turn that off. The UI has its own palette.
 - Exit codes: 0 ok (saved, stub, duplicate, skipped), 1 bad input or failure, 2 stopped (throttled or network down; the URL is queued in `retry.txt`).
 - Two runs at once take turns, so a double-tapped hotkey reports the second as a duplicate.
 
@@ -38,18 +38,18 @@ ln -s "$PWD/yt" ~/.local/bin/yt           # optional: run it as `yt`
 
 ## Logs
 
-`run.log` is tab-separated, one row per run: time, URL, outcome (`saved`, `stub`, `duplicate`, `skipped`, `failed`, `cancelled`, `undone`), detail (note path, or the error with its type and the yt-dlp version), title, seconds, source (`repl`, `argv`, `clipboard`, `retry`). Older rows have fewer columns. It is a watch history, so it is owner-only and gitignored. Count outcomes: `cut -f3 run.log | sort | uniq -c`. Throttled or network-failed URLs go to `retry.txt`.
+`run.log` is tab-separated, one row per run: time, URL, outcome (`saved`, `stub`, `duplicate`, `skipped`, `failed`, `cancelled`, `undone`), detail (note path, or the error with its type and the yt-dlp version), title, seconds, source (`tui`, `argv`, `clipboard`, `retry`; older rows say `repl`). Older rows have fewer columns. It is a watch history, so it is owner-only and gitignored. Count outcomes: `cut -f3 run.log | sort | uniq -c`. Throttled or network-failed URLs go to `retry.txt`.
 
 ## Troubleshooting
 
-- **No notification:** `notify` may be `auto` (prompt runs do not toast) or `never`; check `s`. Also check a notification daemon is running.
-- **Note saved but Obsidian did not open:** `open_obsidian` is off (`s`), or `xdg-open` does not know `obsidian://`.
-- **"throttled by YouTube":** wait up to an hour, then `r` (or `yt --retry`).
+- **No notification:** `notify` may be `auto` (UI runs do not toast) or `never`; check `F2`. Also check a notification daemon is running.
+- **Note saved but Obsidian did not open:** `open_obsidian` is off (`F2`), or `xdg-open` does not know `obsidian://`.
+- **"throttled by YouTube":** wait up to an hour, then `ctrl+r` (or `yt --retry`).
 - **Failures with "Unable to extract" or "nsig":** yt-dlp is stale, see below.
 
 ## When it stops working
 
-1. Update yt-dlp: press `u` in the prompt, or `.venv/bin/pip install -U yt-dlp`.
+1. Update yt-dlp: press `F4` in the UI, or `.venv/bin/pip install -U yt-dlp`.
 2. After an Arch Python upgrade `.venv` breaks (`.venv/bin/python` points at `/usr/bin/python`): `rm -rf .venv && python -m venv .venv && .venv/bin/pip install -r requirements.txt`.
 3. Read the last rows of `run.log`.
 

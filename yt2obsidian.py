@@ -3,14 +3,13 @@ import fcntl
 import json
 import os
 import re
-import readline
 import signal
 import subprocess
 import sys
 import time
 import tomllib
 import unicodedata
-from collections import Counter, namedtuple
+from collections import namedtuple
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -23,7 +22,6 @@ HERE = Path(__file__).resolve().parent
 LOG = HERE / "run.log"
 RETRY = HERE / "retry.txt"
 LOCK = HERE / ".lock"
-HISTORY = HERE / ".history"
 RETRY_DELAY = 2  # seconds, times attempt number
 SETTINGS = {  # config key -> (menu label, default, allowed): bool, a {choice: note} dict, int, or str
     "open_obsidian": ("Open the note in Obsidian after saving", True, bool),
@@ -34,23 +32,13 @@ SETTINGS = {  # config key -> (menu label, default, allowed): bool, a {choice: n
 }
 THROTTLE = ("http error 429", "not a bot", "rate-limited", "try again later")
 FLAGS = ("--retry", "--no-open", "--no-notify")
-USAGE = """usage: yt2obsidian.py [URL]   save a transcript (no URL: prompt in a terminal, else read the clipboard)
-       yt2obsidian.py -i       interactive prompt (or run ./yt; ./yt URL saves one link)
+USAGE = """usage: yt2obsidian.py [URL]   save a transcript (no URL: full-screen UI in a terminal, else read the clipboard)
+       yt2obsidian.py -i       full-screen UI (or run ./yt; ./yt URL saves one link)
        yt2obsidian.py --retry  save the links waiting in retry.txt, stop at the first throttle
-       yt2obsidian.py --settings  settings menu only
+       yt2obsidian.py --settings  open the UI on the settings screen
        yt2obsidian.py -h       this help
 options for a URL or --retry run: --no-open (skip Obsidian), --no-notify (no toasts)
 exit codes: 0 ok (saved, stub, duplicate, skipped), 1 bad input or failure, 2 stopped (throttled or network down, URL queued)"""
-HELP = """  <link>  save a transcript; several links (one per line or space-separated) are saved in turn
-          Enter alone: use the clipboard
-  o       open the last saved note in Obsidian
-  l       list the last 5 saved notes
-  r       retry the links waiting in retry.txt
-  undo    delete the note saved last in this session
-  u       update yt-dlp
-  s       settings
-  ?       this help
-  q       quit"""
 ANSI = {"bold": 1, "dim": 2, "red": 31, "green": 32, "yellow": 33, "blue": 34}
 OUTCOME_COLOR = {"saved": "green", "stub": "yellow", "duplicate": "blue", "skipped": "yellow", "stopped": "yellow",
                  "failed": "red", "invalid": "red"}
@@ -71,6 +59,11 @@ RESTRICTED = "video is private, members-only, or age-restricted"
 LIVE = "live stream or premiere, not finished; transcript not yet available"
 NO_CAPS = "no captions available"
 TOAST_REASON = {RESTRICTED: "restricted", LIVE: "live or upcoming", NO_CAPS: "no captions"}
+
+
+def say(*a):
+    """All progress and outcome lines go through here; the TUI swaps it to show them in a row."""
+    print(*a)
 
 
 class Quiet:
@@ -185,61 +178,6 @@ def unknown_keys(cfg):
     return sorted(set(cfg) - {"vault", *SETTINGS})
 
 
-def settings_menu():
-    """Numbered settings: on/off flips, choices cycle, values are typed. Enter, q or b returns to the prompt."""
-    keys = list(SETTINGS)
-    while True:
-        try:
-            cfg = load_config()
-            print(f"\n{paint('Settings', 'bold')}  {HERE / 'config.toml'}\n  vault: {cfg['vault']}")
-            if bad := unknown_keys(cfg):
-                print(paint(f"  warning: unknown keys ignored: {', '.join(bad)}", "yellow"))
-            for i, k in enumerate(keys, 1):
-                label, _, allowed = SETTINGS[k]
-                print(f"  {i}. [{paint('x', 'green') if cfg[k] else ' '}] {label}" if allowed is bool else f"  {i}. {label}: {show_setting(k, cfg[k])}")
-            pick = ask("Number changes a setting, d resets, Enter goes back\nsettings> ")
-            if pick is None or pick.lower() in ("", "q", "b"):
-                return
-            pick = pick.lower()
-            if pick == "d":
-                reset_settings()
-                print("settings reset to defaults (inbox kept)")
-            elif pick.isdigit() and 1 <= int(pick) <= len(keys):
-                k = keys[int(pick) - 1]
-                label, _, allowed = SETTINGS[k]
-                if allowed is bool:
-                    new = not cfg[k]
-                elif isinstance(allowed, dict):
-                    opts = list(allowed)
-                    new = opts[(opts.index(cfg[k]) + 1) % len(opts)]
-                else:
-                    raw = ask(f"{label} [{cfg[k]}], new value (Enter keeps it): ")
-                    if raw is None:
-                        return
-                    if not raw:
-                        continue
-                    try:
-                        new = parse_setting(k, raw)
-                    except ValueError as e:
-                        print(f"{label} {e}")
-                        continue
-                set_value(k, new)
-                print(f"{label}: {show_setting(k, new)}")
-            else:
-                print(f"pick 1-{len(keys)}, d, or Enter")
-        except (ValueError, OSError) as e:
-            print(paint(f"Config problem: {cap(e)}", "red"))
-            return
-
-
-def ask(prompt):
-    """Stripped input, or None on Ctrl-D / Ctrl-C."""
-    try:
-        return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-
-
 def clean(s):
     """One line, no control characters (titles and yt-dlp errors can carry escape sequences)."""
     return re.sub(r"[\s\x00-\x1f\x7f-\x9f]+", " ", str(s)).strip()
@@ -335,7 +273,7 @@ def with_retries(fn, retries):
                 raise
             if attempt == retries:
                 raise Stop(f"network failure after {attempt} tries: {e}", "network down or unreachable") from e
-            print(paint(f"Retrying ({attempt + 1}/{retries})...", "yellow"))
+            say(paint(f"Retrying ({attempt + 1}/{retries})...", "yellow"))
             time.sleep(RETRY_DELAY * attempt)
 
 
@@ -515,7 +453,7 @@ def toast(cfg, msg, repl=False, urgent=False):
 
 def finish(url, cfg, outcome, msg, code=0, err="", repl=False, path=None, title=None, note=None, secs=None, source=None):
     """The one exit for every run: print, log, toast (`note` is the shorter toast text). Typos typed at the prompt are not logged."""
-    print(re.sub(r"^\w+", lambda m: paint(m.group(), OUTCOME_COLOR.get(outcome, "bold")), msg))  # color the status word
+    say(re.sub(r"^\w+", lambda m: paint(m.group(), OUTCOME_COLOR.get(outcome, "bold")), msg))  # color the status word
     if not (repl and outcome == "invalid"):
         if outcome == "invalid":
             url = cap(url, 60)  # a password pasted by mistake must not land in the log whole
@@ -538,10 +476,10 @@ def process(url, cfg, repl=False, source=None):
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                print("another run is saving, waiting...")
+                say("another run is saving, waiting...")
                 fcntl.flock(lock, fcntl.LOCK_EX)
         except KeyboardInterrupt:
-            print("cancelled")
+            say("cancelled")
             return Result(1, "cancelled")
         return _process(url, cfg, repl, source)
 
@@ -558,7 +496,7 @@ def _process(url, cfg, repl, source):
         try:
             vid, short = parse_url(url)
         except ValueError as e:
-            return fin("invalid", f"failed: {e}" + (" (? for help)" if repl else ""), 1, str(e))
+            return fin("invalid", f"failed: {e}", 1, str(e))
         if short:
             return fin("skipped", f"skipped: Shorts are not processed ({vid})")
         url = canonical = watch_url(vid)  # logged and queued without tracking params
@@ -567,7 +505,7 @@ def _process(url, cfg, repl, source):
                        err=str(old), path=old)
 
         exc = None
-        print(paint("fetching...", "dim"))
+        say(paint("fetching...", "dim"))
         try:
             try:
                 info = with_retries(lambda: fetch(vid, cfg["timeout"]), cfg["retries"])
@@ -580,7 +518,7 @@ def _process(url, cfg, repl, source):
         except Stop as e:
             queue_retry(canonical)
             msg = f"stopped: {e.short or cap(e)}\nqueued in {RETRY.name}: {canonical}"
-            return fin("stopped", msg + ("\nwait a while, then press r" if repl else ""), 2, f"Stop: {e}")
+            return fin("stopped", msg + ("\nwait a while, then press ctrl+r" if repl else ""), 2, f"Stop: {e}")
 
         reason = None if text else stub_reason(info, exc)
         path = write_atomic(inbox, safe_name(info.get("title"), vid, info.get("channel") or info.get("uploader")), render(info, vid, text, reason))
@@ -589,13 +527,13 @@ def _process(url, cfg, repl, source):
         msg = f"saved ({time.monotonic() - t0:.1f}s): {shown}\n  {title}" if text else \
             f"stub ({time.monotonic() - t0:.1f}s): {shown}\n  {title}\n  no transcript: {cap(reason)}"
         if exc and re.search(r"unable to extract|nsig", str(exc), re.I):
-            msg += "\n  hint: yt-dlp may be out of date; press u (update yt-dlp)"
+            msg += "\n  hint: yt-dlp may be out of date; update it (F4 in the UI)"
         if cfg.get("open_obsidian", True):
             open_obsidian(path)
         return fin("saved" if text else "stub", msg, err=str(path) if text else f"{reason} | {path}", path=path, title=title,
                    note=f"Saved: {cap(title, 80)}" if text else f"Stub: {cap(title, 80)} ({TOAST_REASON.get(reason, cap(reason, 60))})")
     except KeyboardInterrupt:
-        print("cancelled")
+        say("cancelled")
         log_run(url, "cancelled")
         return Result(1, "cancelled")
     except (ValueError, OSError) as e:  # config, disk
@@ -616,7 +554,7 @@ def batch(text, cfg, repl=False, source=None):
     urls, results = urls_in(text), []
     for i, u in enumerate(urls):
         if len(urls) > 1:
-            print(f"[{i + 1}/{len(urls)}]")
+            say(f"[{i + 1}/{len(urls)}]")
         results.append(process(u, cfg, repl, source))
         if results[-1].outcome in ("stopped", "cancelled"):
             rest = urls[i + 1:]
@@ -626,7 +564,7 @@ def batch(text, cfg, repl=False, source=None):
                 except ValueError:
                     pass
             if rest:
-                print(f"queued the other {len(rest)} in {RETRY.name}")
+                say(f"queued the other {len(rest)} in {RETRY.name}")
             break
     return results
 
@@ -637,12 +575,12 @@ def update_ytdlp():
     try:
         r = subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"], capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as e:
-        print(f"update failed: {cap(e) or 'cancelled'}")
+        say(f"update failed: {cap(e) or 'cancelled'}")
         return
     if r.returncode:
-        return print(f"update failed: {cap(r.stderr or r.stdout)}")
+        return say(f"update failed: {cap(r.stderr or r.stdout)}")
     new = version("yt-dlp")
-    print(f"yt-dlp {old} -> {new}; quit and start again to use it" if new != old else f"yt-dlp {old} is already the latest")
+    say(f"yt-dlp {old} -> {new}; quit and start again to use it" if new != old else f"yt-dlp {old} is already the latest")
 
 
 def main(args=None, cfg=None, retry=False, **override):
@@ -663,7 +601,7 @@ def retry_queue(cfg, repl=True):
     """Re-run every URL in retry.txt; keep the ones still waiting. Stops at the first throttle."""
     urls, results, left = read_retry(), [], []
     if not urls:
-        print("retry.txt is empty")
+        say("retry.txt is empty")
     for i, u in enumerate(urls):
         results.append(process(u, cfg, repl, "retry"))
         if results[-1].outcome in ("stopped", "cancelled"):
@@ -677,115 +615,12 @@ def retry_queue(cfg, repl=True):
     return results
 
 
-def repl():
-    """Paste a link, press Enter, repeat. Ctrl-D, Ctrl-C or 'q' quits."""
-    try:
-        cfg = load_config()
-        print(f"{paint('yt2obsidian', 'bold')} (yt-dlp {yt_dlp.version.__version__})\n{paint('vault', 'green')}: {cfg['vault']}\n{paint('inbox', 'yellow')}: {cfg['inbox']}")
-        if not (cfg["vault"] / ".obsidian").is_dir():
-            print(paint("warning: no .obsidian folder in the vault; wrong path, or the vault was never opened in Obsidian?", "yellow"))
-        if bad := unknown_keys(cfg):
-            print(paint(f"warning: unknown keys in config.toml ignored: {', '.join(bad)}", "yellow"))
-    except ValueError as e:
-        print(paint(f"Config problem: {e}", "red"))
-    print(f"Paste a YouTube link and press Enter {paint('(? = help, q = quit)', 'red')}")
-    readline.set_auto_history(False)  # only real links go in the history, not typos or pasted secrets
-    try:
-        readline.read_history_file(HISTORY)
-    except OSError:
-        pass
-    readline.set_history_length(200)
-    stats, last, made = Counter(), None, []
-
-    def count(res):
-        nonlocal last
-        if res.outcome != "invalid":  # typos are not part of the session
-            stats[res.outcome] += 1
-            last = res.path or last
-            if res.outcome in ("saved", "stub"):
-                made.append(res)
-
-    try:
-        while True:
-            line = ask("> ")
-            if line is None:
-                break
-            cmd = line.lower()
-            if line.startswith("#"):
-                continue
-            if cmd in ("q", "quit", "exit"):
-                break
-            if cmd in ("?", "h", "help"):
-                print(HELP)
-                continue
-            if cmd == "l":
-                for when, path in recent_saves():
-                    print(f"  {when}  {path}")
-                continue
-            try:
-                cfg = load_config()
-            except ValueError as e:
-                print(paint(f"Config problem: {e}", "red"))
-                continue
-            if cmd in ("s", "settings"):
-                settings_menu()
-            elif cmd == "o":
-                target = last or (recent_saves(1) or [(0, None)])[0][1]
-                print(f"opening {rel(target, cfg['vault'])}" if target else "nothing saved yet")
-                if target:
-                    open_obsidian(target)
-            elif cmd == "r":
-                for res in retry_queue(cfg):
-                    count(res)
-            elif cmd == "u":
-                update_ytdlp()
-            elif cmd == "undo":
-                if not made:
-                    print("nothing to undo")
-                    continue
-                res = made[-1]
-                if (ask(f"delete {rel(res.path, cfg['vault'])}? [y/N] ") or "").lower() == "y":
-                    try:
-                        res.path.unlink(missing_ok=True)
-                    except OSError as e:
-                        print(paint(f"failed: {cap(e)}", "red"))
-                        continue
-                    made.pop()
-                    stats[res.outcome] -= 1
-                    last = last if last != res.path else None
-                    log_run(res.path, "undone")
-                    print(paint("deleted", "green"))
-            else:
-                try:
-                    url = line or clipboard()  # Enter alone pastes for you
-                except (ValueError, OSError, subprocess.SubprocessError) as e:
-                    print(paint(f"failed: {cap(e)}", "red"))
-                    continue
-                results = batch(url, cfg, repl=True)
-                for res in results:
-                    count(res)
-                if line and any(res.outcome != "invalid" for res in results):
-                    readline.add_history(line)
-    finally:
-        try:
-            readline.write_history_file(HISTORY)
-        except OSError:
-            pass
-    if parts := [f"{stats[k]} {k}" for k in SUMMARY if stats[k]]:
-        print(paint("session:", "bold") + " " + ", ".join(parts))
-    if n := len(read_retry()):
-        print(paint(f"{n} URL{'s' * (n != 1)} waiting in {RETRY.name} (r to retry)", "yellow"))
-    return 0
-
-
 def cli(args):
-    if args == ["-i"] or (not args and at_terminal()):  # no terminal = hotkey: read the clipboard
+    if args in (["-i"], ["--settings"]) or (not args and at_terminal()):  # no terminal = hotkey: read the clipboard
         for sig in (signal.SIGTERM, signal.SIGHUP):  # closing the terminal mid-save still cleans up the temp file
             signal.signal(sig, lambda *_: sys.exit(1))
-        return repl()
-    if args == ["--settings"]:
-        settings_menu()
-        return 0
+        import ui  # textual is only needed for the full-screen UI
+        return ui.run(settings=args == ["--settings"])
     if args[:1] in (["-h"], ["--help"]):
         print(USAGE)
         return 0
