@@ -29,7 +29,7 @@ The only user is the author, who is the sole owner of the vault. The tool is a p
 
 6. User Workflow
 The user watches a YouTube video they want to keep and copies the link.
-The user runs `yt` in a terminal and pastes the link at the prompt (Enter alone pastes the clipboard). The command can also take the URL as an argument, and a Hyprland hotkey can run it with no terminal, in which case it reads the clipboard.
+The user runs `yt` in a terminal, which opens a full-screen UI (the TUI). They paste one or more links there (Enter saves; Enter on an empty line pastes the clipboard). See README.md for the keys. The command can also take the URL as an argument, and a Hyprland hotkey can run it with no terminal, in which case it reads the clipboard.
 The tool validates the URL, fetches metadata, fetches the transcript, and writes a note.
 The tool prints the path and title of the new note. Hotkey runs show a desktop notification instead of relying on the terminal.
 The tool opens the new note in Obsidian through an Obsidian URI (can be turned off in settings).

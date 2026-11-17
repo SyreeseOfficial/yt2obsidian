@@ -1,3 +1,5 @@
+> Archived. Most items below are done. Open work is in FINDINGS.md.
+
 # Improvements
 
 Fresh audit of `yt2obsidian.py` (331 lines) after the move to a CLI tool: `./yt` starts an interactive prompt (`-i`) with a settings menu (`open_obsidian` and `notify` toggles); the one-shot clipboard/argument mode and Hyprland bind still work. Line refs are `yt2obsidian.py` at commit 7eb4890 unless noted.
